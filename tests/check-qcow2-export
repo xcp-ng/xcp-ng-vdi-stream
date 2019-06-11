@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+if [ "$#" -lt 2 ]; then
+  echo "usage: $0 <stream-to-file-bin> <vdi> [base]"
+  exit 1
+fi
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+STREAM_TO_FILE=`realpath $1`
+VDI=$2
+BASE=$3
+
+TMP_IMG=`mktemp --tmpdir="$SCRIPT_DIR/images"`
+
+function cleanup {
+  rm $TMP_IMG
+}
+trap cleanup EXIT
+
+# Other method to compare images: Use nbd and compare each file like this:
+#
+# modprobe nbd max_part=8 || exit 1
+#
+# TMP_DIR=`mktemp -d`
+#
+# function cleanup {
+#   umount $TMP_DIR/0 2> /dev/null
+#   umount $TMP_DIR/1 2> /dev/null
+#
+#   qemu-nbd --disconnect /dev/nbd0
+#   qemu-nbd --disconnect /dev/nbd1
+#
+#   rm -rf $TMP_DIR
+# }
+# trap cleanup EXIT
+#
+# qemu-nbd --connect=/dev/nbd0 $1 || exit 1
+# qemu-nbd --connect=/dev/nbd1 $2 || exit 1
+#
+# mkdir $TMP_DIR/0
+# mkdir $TMP_DIR/1
+#
+# mount -o ro,noload /dev/nbd0 $TMP_DIR/0 || exit 1
+# mount -o ro,noload /dev/nbd1 $TMP_DIR/1 || exit 1
+#
+# diff -rq $TMP_DIR/0 $TMP_DIR/1
+
+(cd "$SCRIPT_DIR/images" && $STREAM_TO_FILE $TMP_IMG qcow2 $VDI $BASE && qemu-img compare $VDI $TMP_IMG)
