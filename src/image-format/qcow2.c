@@ -15,14 +15,12 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#define _GNU_SOURCE
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include <xcp-ng/generic/endian.h>
 #include <xcp-ng/generic/file.h>
@@ -189,9 +187,26 @@ void qcow2_header_to_be (QCow2Header *header) {
 
 // =============================================================================
 
-int qcow2_image_open (QCow2Image *image, const char *filename, char **error) {
+static int qcow2_image_close_basic (QCow2Image *image, char **error) {
+  XCP_UNUSED(error);
+  if (image->fd < 0)
+    return 0;
+
+  free(image->filename);
+  free(image->l1Table);
+
+  qcow2_l2_cache_uninit(image);
+
+  xcp_fd_close(image->fd);
+  image->fd = -1;
+
+  return 0;
+}
+
+static int qcow2_image_open_basic (QCow2Image *image, const char *filename, char **error) {
   QCow2Header *header = &image->header;
 
+  image->parent = NULL;
   if ((image->fd = open(filename, O_RDONLY)) < 0) {
     set_error(error, "%s", strerror(errno));
     return -1;
@@ -368,21 +383,79 @@ int qcow2_image_open (QCow2Image *image, const char *filename, char **error) {
   return 0;
 
 fail:
-  qcow2_image_close(image, NULL);
+  qcow2_image_close_basic(image, NULL);
   return -1;
+}
+
+static int qcow2_image_open_rec (QCow2Image *child, char **error) {
+  if (!*child->backingFile)
+    return 0;
+
+  char *dir = xcp_path_parent_dir(child->filename);
+  if (!dir) {
+    set_error(error, "Unable to compute parent dir of `%s`\n", child->filename);
+    return -1;
+  }
+
+  // 1. Compute absolute parent path.
+  char *combinedParentPath = xcp_path_combine(dir, child->backingFile);
+  free(dir);
+  char absParentPath[PATH_MAX];
+  if (!combinedParentPath || !realpath(combinedParentPath, absParentPath)) {
+    free(combinedParentPath);
+    set_error(error, "Unable to get abs parent path of `%s` (%s)\n", child->backingFile, strerror(errno));
+    return -1;
+  }
+  free(combinedParentPath);
+
+  // 2. Open parent image.
+  QCow2Image *parent = malloc(sizeof *parent);
+  if (!parent) {
+    set_error(error, "Unable to alloc parent image");
+    return -1;
+  }
+
+  if (qcow2_image_open_basic(parent, absParentPath, error) < 0) {
+    set_error(error, "Failed to open parent image `%s`: `%s`", absParentPath, *error);
+    free(parent);
+    return -1;
+  }
+  child->parent = parent;
+
+  // 3. Open parent of parent image...
+  return qcow2_image_open_rec(parent, error);
+}
+
+int qcow2_image_open (QCow2Image *image, const char *filename, char **error) {
+  char absoluteFilename[PATH_MAX];
+  if (!realpath(filename, absoluteFilename)) {
+    set_error(error, "Unable to get abs path of image `%s` (%s)", filename, strerror(errno));
+    return -1;
+  }
+
+  if (qcow2_image_open_basic(image, absoluteFilename, error) < 0) {
+    set_error(error, "Failed to open image `%s`: `%s`", absoluteFilename, *error);
+    return -1;
+  }
+
+  if (qcow2_image_open_rec(image, error) < 0) {
+    qcow2_image_close(image, NULL);
+    return -1;
+  }
+  return 0;
 }
 
 int qcow2_image_close (QCow2Image *image, char **error) {
   XCP_UNUSED(error);
-  if (image->fd >= 0) {
-    free(image->filename);
-    free(image->l1Table);
 
-    qcow2_l2_cache_uninit(image);
-
-    xcp_fd_close(image->fd);
-    image->fd = -1;
+  qcow2_image_close_basic(image, NULL);
+  for (image = image->parent; image; ) {
+    QCow2Image *cur = image;
+    qcow2_image_close_basic(cur, NULL);
+    image = image->parent;
+    free(cur);
   }
+
   return 0;
 }
 
@@ -428,7 +501,7 @@ static uint32_t qcow2_compute_contiguous_cluster_count (
   return i;
 }
 
-uint64_t qcow2_find_clusters_offset (
+uint64_t qcow2_image_find_clusters_offset (
   const QCow2Image *image, uint64_t vaddr, size_t nBytes, size_t *nAvailableBytes, uint32_t *typeMask, char **error
 ) {
   uint64_t clustersOffset = 0;
@@ -495,7 +568,7 @@ uint64_t qcow2_find_clusters_offset (
   {
     uint32_t clusterCount = qcow2_image_cluster_count_from_size(image, nBytes);
     clusterCount = qcow2_compute_contiguous_cluster_count(image, &l2Table[l2Index], clusterCount);
-    *nAvailableBytes = clusterCount * image->clusterSize;
+    *nAvailableBytes = clusterCount << image->header.clusterBits;
   }
 
 end:
@@ -510,171 +583,16 @@ end:
   return clustersOffset;
 }
 
-// =============================================================================
-
-static int qcow2_chain_open_rec (
-  QCow2Chain *child, const char *base, const char *expectedBase, const char *dir, char **error
-) {
-  assert(base);
-
-  if (!*base) {
-    if (!expectedBase)
-      return 0; // Full base found!
-    set_error(error, "Unable to find base `%s`", expectedBase);
-    return -1;
-  }
-
-  char *combinedBase = xcp_path_combine(dir, base);
-  char absBase[PATH_MAX] = "";
-  if (!combinedBase || !realpath(combinedBase, absBase)) {
-    free(combinedBase);
-    set_error(error, "Unable to get abs base of `%s` from `%s` (%s)\n", base, strerror(errno));
-    return -1;
-  }
-  free(combinedBase);
-
-  if (expectedBase && !strcmp(absBase, expectedBase))
-    return 0; // Delta base found!
-
-  QCow2Chain *parent = malloc(sizeof *parent);
-  if (!parent) {
-    set_error(error, "Unable to alloc parent chain");
-    return -1;
-  }
-
-  if (qcow2_image_open(&parent->image, absBase, error) < 0) {
-    set_error(error, "Failed to open base `%s`: `%s`", base, *error);
-    free(parent);
-    return -1;
-  }
-
-  child->parent = parent;
-  parent->parent = NULL;
-
-  char *parentDir = xcp_path_parent_dir(absBase);
-  const int ret = qcow2_chain_open_rec(parent, parent->image.backingFile, expectedBase, parentDir, error);
-  free(parentDir);
-  return ret;
-}
-
-static inline char *get_main_image_dir (const char *filename, char *dir) {
-  char progDir[PATH_MAX];
-  if (!getcwd(progDir, sizeof progDir))
-    return NULL;
-
-  char *fullImageDir = NULL;
-  char *imageDir = xcp_path_parent_dir(filename);
-  if (imageDir)
-    fullImageDir = xcp_path_combine(progDir, imageDir);
-  free(imageDir);
-
-  if (fullImageDir) {
-    char *res = realpath(fullImageDir, dir);
-    free(fullImageDir);
-    return res;
-  }
-
-  return NULL;
-}
-
-int qcow2_chain_open (QCow2Chain *chain, const char *filename, const char *base, char **error) {
-  // 1. Open image.
-  QCow2Image *image = &chain->image;
-  if (qcow2_image_open(image, filename, error) < 0)
-    return -1;
-  chain->parent = NULL;
-
-  // 2. Check if base path is equal to image path.
-  char absBase[PATH_MAX] = "";
-  if (base) {
-    char absFilename[PATH_MAX];
-
-    if (!realpath(filename, absFilename) || !realpath(base, absBase)) {
-      set_error(error, "Unable to open qcow2 chain (%s)", strerror(errno));
-      qcow2_image_close(image, NULL);
-      return -1;
-    }
-
-    // If base is the image itself, it's done.
-    if (!strcmp(absFilename, absBase)) {
-      chain->parent = chain;
-      return 0;
-    }
-  }
-
-  // 3. Open the chain.
-  char imageDir[PATH_MAX] = "";
-  if (!get_main_image_dir(filename, imageDir)) {
-    set_error(error, "Failed to get parent directory of `%s` (%s)", filename, strerror(errno));
-    qcow2_image_close(image, NULL);
-    return -1;
-  }
-
-  const int ret = qcow2_chain_open_rec(chain, image->backingFile, *absBase ? absBase : NULL, imageDir, error);
-  if (ret < 0)
-    qcow2_chain_close(chain, NULL);
-  return ret;
-}
-
-int qcow2_chain_close (QCow2Chain *chain, char **error) {
-  int res = 0;
-  if (qcow2_image_close(&chain->image, error) < 0)
-    res = -1;
-
-  if (!qcow2_chain_base_is_itself(chain))
-    for (chain = chain->parent; chain; ) {
-      if (qcow2_image_close(&chain->image, res ? NULL : error) < 0)
-        res = -1;
-
-      QCow2Chain *oldChain = chain;
-      chain = chain->parent;
-      free(oldChain);
-    }
-
-  return res;
-}
-
 // -----------------------------------------------------------------------------
 
-uint64_t qcow2_chain_find_clusters_offset (
-  const QCow2Chain *chain,
-  uint64_t vaddr,
-  size_t nBytes,
-  size_t *nAvailableBytes,
-  uint32_t *typeMask,
-  const QCow2Image **image,
-  char **error
-) {
-  assert(!qcow2_chain_base_is_itself(chain));
-
-  uint64_t clustersOffset = 0;
-  for (const QCow2Chain *p = chain; p; p = p->parent) {
-    *image = (QCow2Image *)&p->image;
-
-    clustersOffset = qcow2_find_clusters_offset(&p->image, vaddr, nBytes, nAvailableBytes, typeMask, error);
-    if (clustersOffset == (uint64_t)-1)
-      break;
-
-    if (*typeMask & (ClusterTypeAllocated | ClusterTypeZero))
-      break;
-
-    nBytes = XCP_MIN(nBytes, *nAvailableBytes);
-  }
-
-  return clustersOffset;
-}
-
-// -----------------------------------------------------------------------------
-
-ssize_t qcow2_chain_read (const QCow2Chain *chain, uint64_t vaddr, size_t nBytes, void *buf, char **error) {
-  const QCow2Image *image = &chain->image;
+ssize_t qcow2_image_read (const QCow2Image *image, uint64_t vaddr, size_t nBytes, void *buf, char **error) {
   const uint64_t startVaddr = vaddr;
   while (nBytes) {
     // 1. Find contiguous clusters at vaddr.
     size_t nAvailableBytes;
     uint32_t typeMask;
     const uint64_t clustersOffset =
-      qcow2_find_clusters_offset(image, vaddr, nBytes, &nAvailableBytes, &typeMask, error);
+      qcow2_image_find_clusters_offset(image, vaddr, nBytes, &nAvailableBytes, &typeMask, error);
     if (clustersOffset == (uint64_t)-1)
       return -1;
 
@@ -686,7 +604,7 @@ ssize_t qcow2_chain_read (const QCow2Chain *chain, uint64_t vaddr, size_t nBytes
     uint64_t readOffset = 0;
     ssize_t ret;
 
-    if ((typeMask & ClusterTypeZero) || ((typeMask & ClusterTypeUnallocated) && !chain->parent)) {
+    if ((typeMask & ClusterTypeZero) || ((typeMask & ClusterTypeUnallocated) && !image->parent)) {
       memset(buf, 0, nAvailableBytes);
       goto next;
     }
@@ -695,7 +613,7 @@ ssize_t qcow2_chain_read (const QCow2Chain *chain, uint64_t vaddr, size_t nBytes
       readOffset = clustersOffset + qcow2_image_offset_to_cluster_padding(image, vaddr);
       ret = xcp_fd_pread(image->fd, buf, nAvailableBytes, (off_t)readOffset);
     } else if (typeMask & ClusterTypeUnallocated)
-      ret = qcow2_chain_read(chain->parent, vaddr, nAvailableBytes, buf, error);
+      ret = qcow2_image_read(image->parent, vaddr, nAvailableBytes, buf, error);
     else
       abort();
 
@@ -721,6 +639,93 @@ ssize_t qcow2_chain_read (const QCow2Chain *chain, uint64_t vaddr, size_t nBytes
   }
 
   return (ssize_t)(vaddr - startVaddr);
+}
+
+// =============================================================================
+
+int qcow2_chain_open (QCow2Chain *chain, const char *filename, const char *base, char **error) {
+  // 1. Open image.
+  QCow2Image *image = &chain->image;
+  if (qcow2_image_open(image, filename, error) < 0)
+    return -1;
+
+  // 2. Find base.
+  if (!base) {
+    chain->base = NULL;
+    return 0;
+  }
+
+  char absBase[PATH_MAX];
+  if (!realpath(base, absBase)) {
+    set_error(error, "Unable to compute absolute base path (%s)", strerror(errno));
+    qcow2_chain_close(chain, NULL);
+    return -1;
+  }
+
+  for (; image; image = image->parent)
+    if (!strcmp(image->filename, absBase)) {
+      chain->base = image;
+      return 0; // Base found!
+    }
+
+  set_error(error, "Unable to find base `%s`", absBase);
+  qcow2_chain_close(chain, NULL);
+  return -1;
+}
+
+int qcow2_chain_close (QCow2Chain *chain, char **error) {
+  chain->base = NULL;
+  return qcow2_image_close(&chain->image, error);
+}
+
+// -----------------------------------------------------------------------------
+
+static inline size_t qcow2_image_get_max_bytes (const QCow2Image *image, uint64_t vaddr, size_t nBytes) {
+  const uint32_t clusterPadding = qcow2_image_offset_to_cluster_padding(image, vaddr);
+  nBytes += clusterPadding;
+
+  const uint32_t l2Index = qcow2_image_vaddr_to_l2_index(image, vaddr);
+  size_t nAvailableBytes = (uint64_t)(image->l2Size - l2Index) << image->header.clusterBits;
+  if (nAvailableBytes > nBytes)
+    nAvailableBytes = nBytes;
+
+  nAvailableBytes -= clusterPadding;
+  return nAvailableBytes;
+}
+
+uint64_t qcow2_chain_find_clusters_offset (
+  const QCow2Chain *chain,
+  uint64_t vaddr,
+  size_t nBytes,
+  size_t *nAvailableBytes,
+  uint32_t *typeMask,
+  const QCow2Image **image,
+  char **error
+) {
+  // Special case when image base is itself.
+  // N available unallocated aligned fake bytes are computed.
+  if (&chain->image == chain->base) {
+    *nAvailableBytes = qcow2_image_get_max_bytes(&chain->image, vaddr, nBytes);
+    *typeMask = ClusterTypeUnallocated;
+    *image = &chain->image;
+    return 0;
+  }
+
+  uint64_t clustersOffset = 0;
+  for (const QCow2Image *it = &chain->image; it && it != chain->base; it = it->parent) {
+    *image = it;
+    clustersOffset = qcow2_image_find_clusters_offset(*image, vaddr, nBytes, nAvailableBytes, typeMask, error);
+    if (clustersOffset == (uint64_t)-1)
+      break;
+
+    if (*typeMask & (ClusterTypeAllocated | ClusterTypeZero))
+      break;
+
+    nBytes = XCP_MIN(nBytes, *nAvailableBytes);
+  }
+
+  assert(*image);
+  return clustersOffset;
 }
 
 // -----------------------------------------------------------------------------
