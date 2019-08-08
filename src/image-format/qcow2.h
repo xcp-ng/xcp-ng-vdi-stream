@@ -122,9 +122,9 @@ typedef struct {
   size_t capacity;
 } QCow2L2Cache;
 
-typedef struct {
+typedef struct QCow2Image {
   int fd; // Descriptor of the current image.
-  char *filename;
+  char *filename; // Absolute filename of the image.
 
   QCow2Header header;
 
@@ -147,21 +147,15 @@ typedef struct {
 
   uint64_t *l1Table;            // All L1 entries.
 
-  char backingFile[1024];
+  char backingFile[1024];       // Backing file, can be relative or absolute.
+
+  struct QCow2Image *parent;
 } QCow2Image;
 
 // =============================================================================
 
 void qcow2_header_from_be (QCow2Header *header);
 void qcow2_header_to_be (QCow2Header *header);
-
-// -----------------------------------------------------------------------------
-
-// Compute the cluster count required to store N L1 entries with M cluster bits.
-XCP_DECL_UNUSED static inline uint32_t qcow2_cluster_count_from_l1_size (uint32_t l1Size, uint32_t clusterBits) {
-  const uint32_t shift = clusterBits - 3;
-  return (l1Size + ((1u << shift) - 1)) >> shift;
-}
 
 // -----------------------------------------------------------------------------
 
@@ -203,6 +197,27 @@ XCP_DECL_UNUSED static inline uint32_t qcow2_image_vaddr_to_l2_index (const QCow
 
 // -----------------------------------------------------------------------------
 
+// Find a sequential set of clusters (of a type mask) given an vaddr and a number of bytes to read.
+// Return -1 if there is an error, otherwise return the clusters offset.
+uint64_t qcow2_image_find_clusters_offset (
+  const QCow2Image *image, uint64_t vaddr, size_t nBytes, size_t *nAvailableBytes, uint32_t *typeMask, char **error
+);
+
+// -----------------------------------------------------------------------------
+
+// Read data at vaddr.
+ssize_t qcow2_image_read (const QCow2Image *image, uint64_t vaddr, size_t nBytes, void *buf, char **error);
+
+// -----------------------------------------------------------------------------
+
+// Compute the cluster count required to store N L1 entries with M cluster bits.
+XCP_DECL_UNUSED static inline uint32_t qcow2_cluster_count_from_l1_size (uint32_t l1Size, uint32_t clusterBits) {
+  const uint32_t shift = clusterBits - 3;
+  return (l1Size + ((1u << shift) - 1)) >> shift;
+}
+
+// -----------------------------------------------------------------------------
+
 XCP_DECL_UNUSED static inline uint32_t qcow2_get_cluster_type_mask (uint64_t l2Entry) {
   if (l2Entry & QCOW2_L2_ENTRY_FLAG_COMPRESSED)
     return ClusterTypeCompressed;
@@ -235,29 +250,22 @@ XCP_DECL_UNUSED static inline const char *qcow2_cluster_type_mask_to_string (uin
   return "{ Unallocated }";
 }
 
-// -----------------------------------------------------------------------------
-
-// Find a sequential set of clusters (of a type mask) given an vaddr and a number of bytes to read.
-// Return -1 if there is an error, otherwise return the clusters offset.
-uint64_t qcow2_image_find_clusters_offset (
-  const QCow2Image *image, uint64_t vaddr, size_t nBytes, size_t *nAvailableBytes, uint32_t *typeMask, char **error
-);
-
-// -----------------------------------------------------------------------------
+// =============================================================================
 
 typedef struct QCow2Chain {
   QCow2Image image;
-  struct QCow2Chain *parent;
+  QCow2Image *base;
 } QCow2Chain;
+
+// -----------------------------------------------------------------------------
 
 int qcow2_chain_open (QCow2Chain *chain, const char *filename, const char *base, char **error);
 int qcow2_chain_close (QCow2Chain *chain, char **error);
 
-XCP_DECL_UNUSED static inline bool qcow2_chain_base_is_itself (const QCow2Chain *chain) {
-  return chain->parent == chain;
-}
+// -----------------------------------------------------------------------------
 
 // Similar to qcow2_image_find_clusters_offset but used on a chain.
+// This function is called on chain->image to chain->base. The parent(s) of chain->base are not used.
 uint64_t qcow2_chain_find_clusters_offset (
   const QCow2Chain *chain,
   uint64_t vaddr,
@@ -268,8 +276,7 @@ uint64_t qcow2_chain_find_clusters_offset (
   char **error
 );
 
-// Read data at vaddr.
-ssize_t qcow2_chain_read (const QCow2Chain *chain, uint64_t vaddr, size_t nBytes, void *buf, char **error);
+// -----------------------------------------------------------------------------
 
 typedef int (*Qcow2ForeachCb)(
   uint64_t sector,

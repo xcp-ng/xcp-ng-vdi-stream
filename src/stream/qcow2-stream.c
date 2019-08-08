@@ -260,7 +260,7 @@ static int write_clusters_data (XcpVdiStream *stream, uint64_t sector, uint64_t 
     const size_t nBytesToRead = XCP_MIN(nBytes, XCP_VDI_STREAM_CHUNK_SIZE - bufSize);
     char *dest = (char *)xcp_vdi_stream_get_buf(stream) + bufSize;
 
-    const ssize_t ret = qcow2_chain_read(chain, vaddr, nBytesToRead, dest, &stream->errorString);
+    const ssize_t ret = qcow2_image_read(&chain->image, vaddr, nBytesToRead, dest, &stream->errorString);
     if (ret < 0)
       return -1;
 
@@ -296,7 +296,15 @@ static int clusters_cb_write_data (
   if (typeMask & ClusterTypeAllocated && !(typeMask & ClusterTypeZero)) {
     // Write accumulated sectors.
     if (!state->accWritten) {
-      if (state->accSectorCount && xcp_vdi_stream_co_write_zeros(stream, state->accSectorCount << N_BITS_PER_SECTOR) < 0)
+      assert(sector >= state->accSectorCount);
+      // Do not use xcp_vdi_stream_co_write_zeros here, we must use write_clusters_data because if the current
+      // cluster size is greater than a parent cluster size, we need to copy data of the parent(s) base image in
+      // this specific condition. We can observe this case with the export of tests/images/10.qcow with
+      // base=tests/images/2.qcow: Cluster data of 1.qcow is merged in bigger clusters of 10.qcow.
+      if (
+        state->accSectorCount &&
+        write_clusters_data(stream, sector - state->accSectorCount, state->accSectorCount << N_BITS_PER_SECTOR) < 0
+      )
         return -1;
       state->accWritten = true;
     }
@@ -311,15 +319,17 @@ static int clusters_cb_write_data (
   } else if (state->accWritten) {
     assert(state->accSectorCount);
     if (state->accSectorCount + sectorCount >= nbSectorsPerCluster) {
-      const uint64_t padding = nbSectorsPerCluster - state->accSectorCount;
-      if (xcp_vdi_stream_co_write_zeros(stream, padding << N_BITS_PER_SECTOR) < 0)
+      // See the previous note.
+      const uint64_t remaining = nbSectorsPerCluster - state->accSectorCount;
+      if (write_clusters_data(stream, sector, remaining << N_BITS_PER_SECTOR) < 0)
         return -1;
 
-      state->accSectorCount = (sectorCount - padding) % nbSectorsPerCluster;
+      state->accSectorCount = (sectorCount - remaining) % nbSectorsPerCluster;
       state->accWritten = false;
     } else {
+      // See the previous note.
       state->accSectorCount += sectorCount;
-      if (xcp_vdi_stream_co_write_zeros(stream, sectorCount << N_BITS_PER_SECTOR) < 0)
+      if (write_clusters_data(stream, sector, sectorCount << N_BITS_PER_SECTOR) < 0)
         return -1;
     }
   } else
@@ -464,10 +474,7 @@ ssize_t qcow2_stream_read (XcpVdiStream *stream) {
       .currentL2TableOffset = l2TablesOffset,
       .currentL1Index = 0
     };
-    if (
-      !qcow2_chain_base_is_itself(chain) &&
-      qcow2_chain_foreach_clusters(chain, clusters_cb_write_l1_table, &state, &stream->errorString) < 0
-    )
+    if (qcow2_chain_foreach_clusters(chain, clusters_cb_write_l1_table, &state, &stream->errorString) < 0)
       return -1;
 
     const uint64_t l1Entry = xcp_to_be_u64(QCOW2_L1_ENTRY_FLAG_COPIED);
@@ -483,10 +490,7 @@ ssize_t qcow2_stream_read (XcpVdiStream *stream) {
   }
   assert(xcp_vdi_stream_get_current_offset(stream) == l2TablesOffset);
 
-  if (qcow2_chain_base_is_itself(chain))
-    return xcp_vdi_stream_co_flush(stream);
-
-  // 7. Write L2 tables.
+  // 5. Write L2 tables.
   const uint64_t l2EntryCount = XCP_DIV_ROUND_UP(header.size, image->clusterSize);
   const uint64_t l2TableCount = XCP_DIV_ROUND_UP(l2EntryCount, image->l2Size);
   uint64_t endOffset;
@@ -527,7 +531,7 @@ ssize_t qcow2_stream_read (XcpVdiStream *stream) {
   }
   assert(xcp_vdi_stream_get_current_offset(stream) == dataOffset);
 
-  // 8. Write data.
+  // 6. Write data.
   {
     ClustersDataWriteState state = {
       .stream = stream,
