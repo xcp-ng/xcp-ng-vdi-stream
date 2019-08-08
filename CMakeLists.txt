@@ -61,7 +61,7 @@ endif ()
 
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -DDEBUG")
 
-find_package(XcpNgGeneric REQUIRED)
+find_package(XcpNgGeneric 1.2.0 REQUIRED)
 
 set(LIBS
   XcpNg::Generic
