@@ -1,2 +1,5 @@
+_build/
+*.install
 build/
+dune-build/
 tests/images/tmp.*

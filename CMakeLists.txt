@@ -24,16 +24,20 @@ cmake_minimum_required(VERSION 3.13.1)
 # Options.
 # ------------------------------------------------------------------------------
 
-option(ENABLE_TOOLS "Build tools." YES)
+option(BUILD_SHARED_LIBS "Build shared library" ON)
+
+option(ENABLE_TOOLS "Build tools" YES)
 
 include(CMakeDependentOption)
-cmake_dependent_option(ENABLE_TESTS "Build tests." ON "ENABLE_TOOLS" OFF)
+cmake_dependent_option(ENABLE_TESTS "Build tests" ON "ENABLE_TOOLS" OFF)
+
+option(ENABLE_OCAML_BINDING "Build OCaml binding")
 
 # ------------------------------------------------------------------------------
 # Config & flags.
 # ------------------------------------------------------------------------------
 
-project(xcp-disk-image-stream VERSION 1.0.0 LANGUAGES C)
+project(xcp-ng-vdi-stream VERSION 1.0.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 
 set(XCP_LIB xcp-ng-vdi-stream)
@@ -81,15 +85,17 @@ set(SOURCES
   src/vdi-driver.c
   src/vdi-stream.c
 )
-add_library(${XCP_LIB} SHARED ${SOURCES})
+
+add_library(${XCP_LIB} ${SOURCES})
 
 # Add an alias for tools.
 add_library(${XCP_NAMESPACE}::${XCP_MODULE} ALIAS ${XCP_LIB})
 
+set(XCP_NG_VDI_STREAM_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(${XCP_LIB}
   PUBLIC
     $<INSTALL_INTERFACE:include>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${XCP_NG_VDI_STREAM_INCLUDE_DIR}>
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
@@ -101,6 +107,7 @@ set_target_properties(${XCP_LIB} PROPERTIES
   VERSION ${PROJECT_VERSION}
   SOVERSION ${PROJECT_VERSION_MAJOR}
   EXPORT_NAME ${XCP_MODULE}
+  POSITION_INDEPENDENT_CODE ON
 )
 
 if (ENABLE_TOOLS)
@@ -110,6 +117,21 @@ endif ()
 if (ENABLE_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif ()
+
+if (ENABLE_OCAML_BINDING)
+  if (BUILD_SHARED_LIBS)
+    message(FATAL_ERROR "Cannot build OCaml binding: ${XCP_LIB} must be a static lib.")
+  endif ()
+
+  foreach (LIB ${LIBS})
+    get_property(TARGET_TYPE TARGET ${LIB} PROPERTY TYPE)
+    if (NOT ${TARGET_TYPE} STREQUAL "STATIC_LIBRARY")
+      message(FATAL_ERROR "Cannot build OCaml binding: ${LIB} dependency is not a static lib.")
+    endif ()
+  endforeach ()
+
+  add_subdirectory(bindings/ocaml)
 endif ()
 
 # ------------------------------------------------------------------------------

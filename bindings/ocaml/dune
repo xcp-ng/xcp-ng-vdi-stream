@@ -1,0 +1,12 @@
+(library
+  (name xcp_ng_vdi_stream)
+  (public_name xcp_ng_vdi_stream)
+  (c_library_flags -lpthread)
+  (self_build_stubs_archive (xcp_ng_vdi_stream))
+)
+
+(rule
+  (targets libxcp_ng_vdi_stream_stubs.a dllxcp_ng_vdi_stream_stubs.so)
+  (action (echo "Build the xcp-ng-vdi-stream project with CMake first!\n"))
+  (mode fallback)
+)
