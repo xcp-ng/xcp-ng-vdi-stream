@@ -15,12 +15,13 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *)
 
-type xcp_vdi_stream
-
-external xcp_vdi_stream_new: unit -> xcp_vdi_stream = "stub_xcp_vdi_stream_new"
-external xcp_vdi_stream_open: xcp_vdi_stream -> string -> string -> string -> int = "stub_xcp_vdi_stream_open"
-external xcp_vdi_stream_close: xcp_vdi_stream -> int = "stub_xcp_vdi_stream_close"
-external xcp_vdi_stream_get_error_string: xcp_vdi_stream -> string = "stub_xcp_vdi_stream_get_error_string"
-external xcp_vdi_stream_get_format: xcp_vdi_stream -> string = "xcp_vdi_stream_get_format"
-external xcp_vdi_stream_dump_info: xcp_vdi_stream -> int -> unit = "stub_xcp_vdi_stream_dump_info"
-external xcp_vdi_stream_read: xcp_vdi_stream -> int * Bigarray.int8_unsigned_elt = "stub_xcp_vdi_stream_read"
+module XcpNgVdiStream = struct
+  type stream
+  external create: unit -> stream = "stub_xcp_vdi_stream_new"
+  external open_in: stream -> string -> string -> string -> int = "stub_xcp_vdi_stream_open"
+  external close: stream -> int = "stub_xcp_vdi_stream_close"
+  external get_error_string: stream -> string = "stub_xcp_vdi_stream_get_error_string"
+  external get_format: stream -> string = "xcp_vdi_stream_get_format"
+  external dump_info: stream -> int -> unit = "stub_xcp_vdi_stream_dump_info"
+  external read: stream -> int * Bigarray.int8_unsigned_elt = "stub_xcp_vdi_stream_read"
+end

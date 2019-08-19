@@ -15,12 +15,14 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *)
 
-type xcp_vdi_stream
-
-val xcp_vdi_stream_new: unit -> xcp_vdi_stream
-val xcp_vdi_stream_open: xcp_vdi_stream -> string -> string -> string -> int
-val xcp_vdi_stream_close: xcp_vdi_stream -> int
-val xcp_vdi_stream_get_error_string: xcp_vdi_stream -> string
-val xcp_vdi_stream_get_format: xcp_vdi_stream -> string
-val xcp_vdi_stream_dump_info: xcp_vdi_stream -> int -> unit
-val xcp_vdi_stream_read: xcp_vdi_stream -> int * Bigarray.int8_unsigned_elt
+module XcpNgVdiStream:
+  sig
+    type stream
+    val create: unit -> stream
+    val open_in: stream -> string -> string -> string -> int
+    val close: stream -> int
+    val get_error_string: stream -> string
+    val get_format: stream -> string
+    val dump_info: stream -> int -> unit
+    val read: stream -> int * Bigarray.int8_unsigned_elt
+  end
