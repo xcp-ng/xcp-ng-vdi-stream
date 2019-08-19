@@ -16,11 +16,6 @@
  */
 
 // See: https://caml.inria.fr/pub/docs/manual-ocaml/intfc.html
-
-// Can be built like this:
-// ocamlc xcp_ng_vdi_stream.mli
-// ocamlc -custom xcp_ng_vdi_stream.ml xcp_ng_vdi_stream_stubs.c -cclib ../../build/libxcp-ng-vdi-stream.so -I ../../include -a -o xcp_ng_vdi_stream.cma
-
 #include <caml/alloc.h>
 #include <caml/bigarray.h>
 #include <caml/custom.h>

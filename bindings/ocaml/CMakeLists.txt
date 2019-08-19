@@ -92,7 +92,7 @@ set(DUNE_BUILD_INSTALL_FILE "${PROJECT_SOURCE_DIR}/xcp_ng_vdi_stream.install")
 add_custom_command(
   OUTPUT ${DUNE_BUILD_INSTALL_FILE}
   COMMAND rm -f ${DUNE_BUILD_INSTALL_FILE}
-  COMMAND ${DUNE} build -p xcp_ng_vdi_stream --build-dir=dune-build --verbose
+  COMMAND ${DUNE} build -p xcp-ng-vdi-stream --build-dir=dune-build --verbose
   WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
   DEPENDS ${XCP_OCAML_LIB_STATIC_DEST} ${XCP_OCAML_LIB_SHARED_DEST} "${CMAKE_CURRENT_SOURCE_DIR}/dune"
 )
