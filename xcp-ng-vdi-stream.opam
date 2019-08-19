@@ -1,0 +1,14 @@
+opam-version: "2.0"
+name: "xcp-ng-vdi-stream"
+version: "1.0.0"
+synopsis: "Library to stream virtual disk images and differencing disks"
+maintainer: "ronan.abhamon@vates.fr"
+authors: "Ronan Abhamon <ronan.abhamon@vates.fr>"
+homepage: "https://github.com/xcp-ng/xcp-ng-vdi-stream"
+bug-reports: "https://github.com/xcp-ng/xcp-ng-vdi-stream/issues"
+build: [ [ "./bindings/ocaml/opam-build.sh" ] ]
+depends: [
+  "ocaml"
+  "dune" {build}
+]
+available: [os = "linux"]
